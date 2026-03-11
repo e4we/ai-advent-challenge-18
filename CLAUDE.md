@@ -33,11 +33,16 @@ MCP-сервер напоминаний на Go — stdio-сервер, позв
 
 ```
 Claude Desktop/Code ←→ MCP Server (stdin/stdout JSON-RPC)
-                           ↓
-                     Tool handlers → Store (SQLite)
-                                       ↑
-                     Scheduler (горутина, тикер) ──┘
+       ↑ notifications/resources/list_changed    ↓
+       │                               Tool handlers → Store (SQLite)
+       │                                                   ↑
+       └──── Scheduler (горутина, тикер) ─────────────────┘
+                    │ OnFired коллбэк
+                    └→ server.AddResource("reminder://fired/{id}")
 ```
+
+CLI-агент (`cmd/agent/`): async stdin-горутина + `notifyCh chan struct{}` + select-loop.
+`ResourceListChangedHandler` пишет в `notifyCh`, агент инжектирует системное сообщение.
 
 ### Ключевые архитектурные решения
 
@@ -46,6 +51,7 @@ Claude Desktop/Code ←→ MCP Server (stdin/stdout JSON-RPC)
 - **SQLite прагмы**: WAL-режим для конкурентного чтения/записи + `busy_timeout=5000` для предотвращения SQLITE_BUSY.
 - **`GetSummary()` использует транзакцию**: 3 запроса обёрнуты в `tx.Begin()`/`tx.Commit()` для консистентного снимка данных.
 - **Тесты планировщика используют polling** (хелпер `waitFor`), а не `time.Sleep`, чтобы избежать flaky-тестов на CI.
+- **`Scheduler.OnFired func(models.Reminder)`**: коллбэк для push-нотификаций. Вызывается синхронно в горутине планировщика после `MarkFired`. `FiredAt` устанавливается в памяти перед вызовом (`r.FiredAt = &now`), т.к. `GetDueReminders` возвращает `r` без него. Если nil — игнорируется (тесты не ломаются).
 
 ### Жизненный цикл напоминания
 

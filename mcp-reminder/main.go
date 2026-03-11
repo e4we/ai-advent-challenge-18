@@ -18,12 +18,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"mcp-reminder/models"
 	"mcp-reminder/scheduler"
 	"mcp-reminder/storage"
 	"mcp-reminder/tools"
@@ -75,8 +77,6 @@ func main() {
 	// Он работает фоново: проверяет БД каждые 30 секунд,
 	// не блокируя обработку MCP-запросов.
 	sched := scheduler.NewScheduler(store)
-	go sched.Start(ctx)
-	logger.Println("scheduler started")
 
 	// --- 5. Создание MCP-сервера ---
 	// Implementation описывает сервер для клиента при инициализации сессии.
@@ -89,6 +89,39 @@ func main() {
 	// Регистрируем все MCP-инструменты на сервере.
 	tools.RegisterTools(server, store)
 	logger.Println("MCP server created with tools: create_reminder, list_reminders, get_summary, delete_reminder")
+
+	// --- 5a. Подписка на срабатывание напоминаний → push-нотификация ---
+	// При каждом срабатывании добавляем ресурс reminder://fired/{id}.
+	// go-sdk автоматически рассылает notifications/resources/list_changed всем клиентам.
+	sched.OnFired = func(r models.Reminder) {
+		firedAt := r.DueAt.Format(time.RFC3339)
+		if r.FiredAt != nil {
+			firedAt = r.FiredAt.Format(time.RFC3339)
+		}
+		res := &mcp.Resource{
+			URI:         "reminder://fired/" + r.ID,
+			Name:        r.Title,
+			Description: "сработало в " + firedAt,
+			MIMEType:    "application/json",
+		}
+		server.AddResource(res, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			data, err := json.Marshal(r)
+			if err != nil {
+				return nil, err
+			}
+			return &mcp.ReadResourceResult{
+				Contents: []*mcp.ResourceContents{{
+					URI:      req.Params.URI,
+					MIMEType: "application/json",
+					Text:     string(data),
+				}},
+			}, nil
+		})
+		logger.Printf("push-нотификация: добавлен ресурс reminder://fired/%s", r.ID)
+	}
+
+	go sched.Start(ctx)
+	logger.Println("scheduler started")
 
 	// --- 6. Запуск MCP-сервера через StdioTransport ---
 	// StdioTransport — стандартный транспорт для MCP:

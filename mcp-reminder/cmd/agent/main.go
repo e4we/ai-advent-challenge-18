@@ -51,8 +51,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
+	// Канал для приёма push-нотификаций от MCP-сервера (resources/list_changed).
+	notifyCh := make(chan struct{}, 10)
+
 	// Подключаемся к MCP-серверу
-	session, err := connectMCP(ctx, logger)
+	session, err := connectMCP(ctx, logger, notifyCh)
 	if err != nil {
 		logger.Fatalf("не удалось подключиться к MCP-серверу: %v", err)
 	}
@@ -74,11 +77,12 @@ func main() {
 	fmt.Println("Агент напоминаний запущен. Введите запрос (Ctrl+C для выхода):")
 	fmt.Println()
 
-	runChatLoop(ctx, logger, client, session, tools)
+	runChatLoop(ctx, logger, client, session, tools, notifyCh)
 }
 
 // connectMCP запускает MCP-сервер как subprocess и устанавливает соединение.
-func connectMCP(ctx context.Context, logger *log.Logger) (*mcp.ClientSession, error) {
+// notifyCh получает сигнал при каждом notifications/resources/list_changed.
+func connectMCP(ctx context.Context, logger *log.Logger, notifyCh chan<- struct{}) (*mcp.ClientSession, error) {
 	cmd := exec.Command("./mcp-reminder.exe")
 	cmd.Stderr = os.Stderr
 
@@ -86,7 +90,14 @@ func connectMCP(ctx context.Context, logger *log.Logger) (*mcp.ClientSession, er
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "reminder-agent",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ClientOptions{
+		ResourceListChangedHandler: func(ctx context.Context, req *mcp.ResourceListChangedRequest) {
+			select {
+			case notifyCh <- struct{}{}:
+			default: // не блокировать SDK-горутину, буфер справится
+			}
+		},
+	})
 
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
@@ -147,30 +158,77 @@ func convertTools(mcpTools []*mcp.Tool) []anthropic.ToolUnionParam {
 }
 
 // runChatLoop — основной интерактивный цикл чтения ввода и обработки.
-func runChatLoop(ctx context.Context, logger *log.Logger, client anthropic.Client, session *mcp.ClientSession, tools []anthropic.ToolUnionParam) {
-	scanner := bufio.NewScanner(os.Stdin)
+// Поддерживает async push-нотификации через notifyCh: когда планировщик
+// срабатывает, агент сам инжектирует системное сообщение без ввода пользователя.
+func runChatLoop(ctx context.Context, logger *log.Logger, client anthropic.Client, session *mcp.ClientSession, tools []anthropic.ToolUnionParam, notifyCh <-chan struct{}) {
 	var messages []anthropic.MessageParam
 
+	// Чтение stdin в отдельной горутине, чтобы не блокировать select.
+	inputCh := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			input := strings.TrimSpace(scanner.Text())
+			if input == "" {
+				fmt.Print("> ")
+				continue
+			}
+			select {
+			case inputCh <- input:
+			case <-ctx.Done():
+				return
+			}
+		}
+		close(inputCh)
+	}()
+
+	fmt.Print("> ")
+
 	for {
-		fmt.Print("> ")
-		if !scanner.Scan() {
-			break
-		}
-		input := strings.TrimSpace(scanner.Text())
-		if input == "" {
-			continue
-		}
+		select {
+		case <-ctx.Done():
+			return
 
-		messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(input)))
+		case input, ok := <-inputCh:
+			if !ok {
+				return
+			}
+			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(input)))
+			var err error
+			messages, err = agentTurn(ctx, logger, client, session, tools, messages)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Ошибка: %v\n", err)
+				messages = messages[:len(messages)-1]
+			}
+			fmt.Println()
+			fmt.Print("> ")
 
-		var err error
-		messages, err = agentTurn(ctx, logger, client, session, tools, messages)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Ошибка: %v\n", err)
-			// Убираем последнее сообщение пользователя, чтобы не зацикливаться
-			messages = messages[:len(messages)-1]
+		case <-notifyCh:
+			// Дренируем лишние нотификации, накопившиеся за время обработки.
+			drainCh(notifyCh)
+			sysMsg := "[СИСТЕМА] Сработало одно или несколько напоминаний. " +
+				"Вызови list_reminders(status=\"fired\") и сообщи пользователю."
+			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(sysMsg)))
+			var err error
+			messages, err = agentTurn(ctx, logger, client, session, tools, messages)
+			if err != nil {
+				logger.Printf("ошибка при обработке нотификации: %v", err)
+				messages = messages[:len(messages)-1]
+			}
+			fmt.Println()
+			fmt.Print("> ")
 		}
-		fmt.Println()
+	}
+}
+
+// drainCh сбрасывает все накопившиеся значения из небуферизованного/буферизованного канала.
+func drainCh(ch <-chan struct{}) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
 	}
 }
 

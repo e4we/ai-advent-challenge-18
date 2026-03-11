@@ -57,6 +57,11 @@ type Scheduler struct {
 	// interval — интервал проверки. Вынесен в поле для удобства тестирования:
 	// в тестах используем 100ms вместо 30s.
 	interval time.Duration
+
+	// OnFired — коллбэк, вызываемый при срабатывании напоминания.
+	// Вызывается синхронно в горутине планировщика после MarkFired.
+	// Если nil — игнорируется. Устанавливается из main.go для push-нотификаций.
+	OnFired func(r models.Reminder)
 }
 
 // NewScheduler создаёт новый планировщик с дефолтным интервалом 30 секунд.
@@ -149,7 +154,16 @@ func (s *Scheduler) checkAndFire() {
 			continue
 		}
 
+		// Устанавливаем FiredAt в памяти, т.к. GetDueReminders возвращает r без него.
+		now := time.Now()
+		r.FiredAt = &now
+
 		s.logger.Printf("FIRED: [%s] %q (due: %s)", r.ID, r.Title, r.DueAt.Format(time.RFC3339))
+
+		// Вызываем коллбэк, если установлен (например, для MCP push-нотификаций).
+		if s.OnFired != nil {
+			s.OnFired(r)
+		}
 
 		// Для периодических напоминаний — создаём следующее вхождение.
 		if r.CronExpr != "" {
