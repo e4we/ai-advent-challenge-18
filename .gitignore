@@ -1,0 +1,11 @@
+# Go binaries
+*.exe
+mcp-reminder/mcp-reminder
+
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm
+
+# Go build cache
+/vendor/
