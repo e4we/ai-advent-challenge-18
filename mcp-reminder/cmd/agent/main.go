@@ -128,6 +128,13 @@ func convertTools(mcpTools []*mcp.Tool) []anthropic.ToolUnionParam {
 			}
 		}
 
+		// Гарантируем непустую схему для инструментов без параметров (например, get_summary).
+		// ToolInputSchemaParam с nil Properties считается нулевым и опускается из JSON с тегом omitzero,
+		// что вызывает ошибку API "input_schema: Field required".
+		if schema.Properties == nil {
+			schema.Properties = map[string]any{}
+		}
+
 		tools = append(tools, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
 				Name:        t.Name,

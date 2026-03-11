@@ -78,16 +78,16 @@ func RegisterTools(server *mcp.Server, store *storage.Store) {
 // Теги jsonschema описывают поля для документации в JSON Schema.
 type CreateReminderInput struct {
 	// Title — обязательный текст напоминания.
-	Title string `json:"title" jsonschema:"description=Текст напоминания"`
+	Title string `json:"title" jsonschema:"Текст напоминания"`
 
 	// DueInMinutes — через сколько минут сработает напоминание.
 	// Используется если не задан cron_expr. 0 = сейчас.
 	// Указатель позволяет различить "поле не передано" (nil) и "передан 0".
-	DueInMinutes *int `json:"due_in_minutes,omitempty" jsonschema:"description=Через сколько минут сработать (0 = сейчас)"`
+	DueInMinutes *int `json:"due_in_minutes,omitempty" jsonschema:"Через сколько минут сработать (0 = сейчас)"`
 
 	// CronExpr — cron-расписание для периодических напоминаний.
 	// Пример: "0 9 * * 1-5" — каждый будний день в 9:00.
-	CronExpr string `json:"cron_expr,omitempty" jsonschema:"description=Cron-выражение для периодических напоминаний (5 полей: мин час день месяц деньнедели)"`
+	CronExpr string `json:"cron_expr,omitempty" jsonschema:"Cron-выражение для периодических напоминаний (5 полей: мин час день месяц деньнедели)"`
 }
 
 // CreateReminderOutput — результат инструмента create_reminder.
@@ -153,7 +153,7 @@ func makeCreateReminderHandler(store *storage.Store) mcp.ToolHandlerFor[CreateRe
 // ListRemindersInput — входные параметры инструмента list_reminders.
 type ListRemindersInput struct {
 	// Status — фильтр по статусу. Пустая строка = все.
-	Status string `json:"status,omitempty" jsonschema:"description=Фильтр по статусу: pending/fired/cancelled. Пусто = все"`
+	Status string `json:"status,omitempty" jsonschema:"Фильтр по статусу: pending/fired/cancelled. Пусто = все"`
 }
 
 // ListRemindersOutput — результат инструмента list_reminders.
@@ -256,7 +256,7 @@ func makeGetSummaryHandler(store *storage.Store) mcp.ToolHandlerFor[GetSummaryIn
 // DeleteReminderInput — входные параметры инструмента delete_reminder.
 type DeleteReminderInput struct {
 	// ID — идентификатор напоминания для удаления.
-	ID string `json:"id" jsonschema:"description=ID напоминания для отмены"`
+	ID string `json:"id" jsonschema:"ID напоминания для отмены"`
 }
 
 // DeleteReminderOutput — результат инструмента delete_reminder.
