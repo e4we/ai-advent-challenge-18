@@ -61,6 +61,14 @@ func (s *Store) init() error {
 		return fmt.Errorf("enable WAL mode: %w", err)
 	}
 
+	// busy_timeout заставляет SQLite ждать до 5 секунд при блокировке,
+	// вместо немедленного возврата SQLITE_BUSY.
+	// Это важно при конкурентном доступе из нескольких горутин.
+	_, err = s.db.Exec(`PRAGMA busy_timeout=5000`)
+	if err != nil {
+		return fmt.Errorf("set busy_timeout: %w", err)
+	}
+
 	// Создаём таблицу напоминаний.
 	// fired_at без NOT NULL — может быть NULL пока напоминание не сработало.
 	_, err = s.db.Exec(`
@@ -164,6 +172,23 @@ func (s *Store) Delete(id string) error {
 	return nil
 }
 
+// Cancel помечает напоминание как cancelled (soft-delete).
+// Обновляет только pending-напоминания — уже fired или cancelled не затрагиваются.
+func (s *Store) Cancel(id string) error {
+	result, err := s.db.Exec(
+		`UPDATE reminders SET status = 'cancelled' WHERE id = ? AND status = 'pending'`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("cancel reminder: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("reminder %q not found or already cancelled/fired", id)
+	}
+	return nil
+}
+
 // MarkFired помечает напоминание как сработавшее:
 // устанавливает status="fired" и fired_at=текущее время UTC.
 func (s *Store) MarkFired(id string) error {
@@ -208,9 +233,16 @@ func (s *Store) GetDueReminders() ([]models.Reminder, error) {
 func (s *Store) GetSummary() (models.ReminderSummary, error) {
 	var summary models.ReminderSummary
 
+	// Оборачиваем все запросы в read-only транзакцию, чтобы гарантировать
+	// консистентный снимок данных: между запросами данные не изменятся.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return summary, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Агрегированные счётчики одним запросом.
-	// COUNT(CASE WHEN status = 'X' THEN 1 END) считает строки с нужным статусом.
-	row := s.db.QueryRow(`
+	row := tx.QueryRow(`
 		SELECT
 			COUNT(*) as total,
 			COUNT(CASE WHEN status = 'pending'   THEN 1 END) as pending,
@@ -228,7 +260,7 @@ func (s *Store) GetSummary() (models.ReminderSummary, error) {
 	}
 
 	// Ближайшие 5 pending-напоминаний (сортировка по возрастанию due_at).
-	upcomingRows, err := s.db.Query(`
+	upcomingRows, err := tx.Query(`
 		SELECT id, title, due_at, cron_expr, status, created_at, fired_at
 		FROM reminders
 		WHERE status = 'pending'
@@ -246,7 +278,7 @@ func (s *Store) GetSummary() (models.ReminderSummary, error) {
 	}
 
 	// Последние 5 сработавших (сортировка по убыванию fired_at — самые свежие первыми).
-	firedRows, err := s.db.Query(`
+	firedRows, err := tx.Query(`
 		SELECT id, title, due_at, cron_expr, status, created_at, fired_at
 		FROM reminders
 		WHERE status = 'fired'
@@ -261,6 +293,10 @@ func (s *Store) GetSummary() (models.ReminderSummary, error) {
 	summary.RecentlyFired, err = scanReminders(firedRows)
 	if err != nil {
 		return summary, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return summary, fmt.Errorf("commit transaction: %w", err)
 	}
 
 	return summary, nil

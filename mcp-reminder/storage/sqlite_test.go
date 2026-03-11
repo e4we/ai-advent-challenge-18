@@ -188,22 +188,30 @@ func TestGetDueReminders(t *testing.T) {
 func TestGetSummary(t *testing.T) {
 	store := newTestStore(t)
 
-	// Создаём по 2 напоминания каждого статуса.
+	// Создаём 2 pending-напоминания.
 	for i := 0; i < 2; i++ {
 		r := models.NewReminder("pending", time.Now().Add(time.Hour), "")
-		store.Create(r)
+		if err := store.Create(r); err != nil {
+			t.Fatalf("Create pending: %v", err)
+		}
 	}
+	// Создаём 3 fired-напоминания.
 	for i := 0; i < 3; i++ {
 		r := models.NewReminder("to be fired", time.Now().Add(-time.Hour), "")
-		store.Create(r)
-		store.MarkFired(r.ID)
+		if err := store.Create(r); err != nil {
+			t.Fatalf("Create to-fire: %v", err)
+		}
+		if err := store.MarkFired(r.ID); err != nil {
+			t.Fatalf("MarkFired: %v", err)
+		}
 	}
-	for i := 0; i < 1; i++ {
-		r := models.NewReminder("to be deleted", time.Now().Add(time.Hour), "")
-		store.Create(r)
-		// Удаляем = физически удаляем из БД; cancelled не поддерживается напрямую.
-		// Для теста GetSummary нам достаточно проверить pending и fired.
-		_ = r
+	// Создаём 1 cancelled-напоминание через Cancel.
+	rc := models.NewReminder("to be cancelled", time.Now().Add(time.Hour), "")
+	if err := store.Create(rc); err != nil {
+		t.Fatalf("Create to-cancel: %v", err)
+	}
+	if err := store.Cancel(rc.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
 	}
 
 	summary, err := store.GetSummary()
@@ -211,23 +219,84 @@ func TestGetSummary(t *testing.T) {
 		t.Fatalf("GetSummary: %v", err)
 	}
 
-	// Всего: 2 pending + 3 fired + 1 pending (не удалённый) = 6 записей.
+	// Всего: 2 pending + 3 fired + 1 cancelled = 6 записей.
 	if summary.TotalCount != 6 {
 		t.Errorf("TotalCount: got %d, want 6", summary.TotalCount)
 	}
-	if summary.PendingCount != 3 {
-		t.Errorf("PendingCount: got %d, want 3", summary.PendingCount)
+	if summary.PendingCount != 2 {
+		t.Errorf("PendingCount: got %d, want 2", summary.PendingCount)
 	}
 	if summary.FiredCount != 3 {
 		t.Errorf("FiredCount: got %d, want 3", summary.FiredCount)
 	}
+	if summary.CancelledCount != 1 {
+		t.Errorf("CancelledCount: got %d, want 1", summary.CancelledCount)
+	}
 
-	// Ближайшие pending — должно быть 3 (но не больше 5).
-	if len(summary.Upcoming) != 3 {
-		t.Errorf("Upcoming: got %d, want 3", len(summary.Upcoming))
+	// Ближайшие pending — должно быть 2 (но не больше 5).
+	if len(summary.Upcoming) != 2 {
+		t.Errorf("Upcoming: got %d, want 2", len(summary.Upcoming))
 	}
 	// Последние сработавшие — должно быть 3.
 	if len(summary.RecentlyFired) != 3 {
 		t.Errorf("RecentlyFired: got %d, want 3", len(summary.RecentlyFired))
+	}
+}
+
+// TestGetByIDNotFound проверяет, что несуществующий ID возвращает ошибку.
+func TestGetByIDNotFound(t *testing.T) {
+	store := newTestStore(t)
+
+	_, err := store.GetByID("nonexistent-id")
+	if err == nil {
+		t.Error("expected error for nonexistent ID, got nil")
+	}
+}
+
+// TestDeleteNonExistent проверяет, что удаление несуществующего ID возвращает ошибку.
+func TestDeleteNonExistent(t *testing.T) {
+	store := newTestStore(t)
+
+	err := store.Delete("nonexistent-id")
+	if err == nil {
+		t.Error("expected error for nonexistent ID, got nil")
+	}
+}
+
+// TestCancelNonExistent проверяет, что отмена несуществующего ID возвращает ошибку.
+func TestCancelNonExistent(t *testing.T) {
+	store := newTestStore(t)
+
+	err := store.Cancel("nonexistent-id")
+	if err == nil {
+		t.Error("expected error for nonexistent ID, got nil")
+	}
+}
+
+// TestCancelAlreadyFired проверяет, что нельзя отменить уже сработавшее напоминание.
+func TestCancelAlreadyFired(t *testing.T) {
+	store := newTestStore(t)
+
+	r := models.NewReminder("fired reminder", time.Now().Add(-time.Hour), "")
+	if err := store.Create(r); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.MarkFired(r.ID); err != nil {
+		t.Fatalf("MarkFired: %v", err)
+	}
+
+	err := store.Cancel(r.ID)
+	if err == nil {
+		t.Error("expected error when cancelling fired reminder, got nil")
+	}
+}
+
+// TestMarkFiredNonExistent проверяет, что MarkFired для несуществующего ID возвращает ошибку.
+func TestMarkFiredNonExistent(t *testing.T) {
+	store := newTestStore(t)
+
+	err := store.MarkFired("nonexistent-id")
+	if err == nil {
+		t.Error("expected error for nonexistent ID, got nil")
 	}
 }

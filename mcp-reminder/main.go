@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"mcp-reminder/scheduler"
 	"mcp-reminder/storage"
@@ -117,7 +118,17 @@ func main() {
 	// сначала планировщик (он зависит от store), потом store.
 
 	logger.Println("stopping scheduler...")
-	sched.Stop()
+	// Timeout на остановку планировщика, чтобы процесс не завис.
+	stopDone := make(chan struct{})
+	go func() {
+		sched.Stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		logger.Println("scheduler stop timed out")
+	}
 
 	logger.Println("closing storage...")
 	if err := store.Close(); err != nil {

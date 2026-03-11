@@ -9,3 +9,7 @@ mcp-reminder/mcp-reminder
 
 # Go build cache
 /vendor/
+
+# claude
+/.claude
+/.features

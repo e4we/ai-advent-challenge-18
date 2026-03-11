@@ -29,9 +29,10 @@ func TestCreateReminder(t *testing.T) {
 	store := newTestStore(t)
 	handler := makeCreateReminderHandler(store)
 
+	dueIn := 30
 	input := CreateReminderInput{
 		Title:        "встреча с командой",
-		DueInMinutes: 30,
+		DueInMinutes: &dueIn,
 	}
 
 	// Вызываем handler напрямую (без MCP-сервера).
@@ -73,8 +74,9 @@ func TestCreateReminderValidation(t *testing.T) {
 	handler := makeCreateReminderHandler(store)
 
 	// Пустой title — должна быть ошибка.
+	dueIn10 := 10
 	_, _, err := handler(context.Background(), &mcp.CallToolRequest{}, CreateReminderInput{
-		DueInMinutes: 10,
+		DueInMinutes: &dueIn10,
 	})
 	if err == nil {
 		t.Error("expected error for empty title, got nil")
@@ -170,12 +172,14 @@ func TestGetSummary(t *testing.T) {
 	}
 }
 
-// TestDeleteReminder проверяет, что delete_reminder удаляет напоминание из БД.
+// TestDeleteReminder проверяет, что delete_reminder помечает напоминание как cancelled.
 func TestDeleteReminder(t *testing.T) {
 	store := newTestStore(t)
 
 	r := models.NewReminder("удалить меня", time.Now().Add(time.Hour), "")
-	store.Create(r)
+	if err := store.Create(r); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
 
 	handler := makeDeleteReminderHandler(store)
 
@@ -190,9 +194,12 @@ func TestDeleteReminder(t *testing.T) {
 		t.Errorf("output ID: got %q, want %q", output.ID, r.ID)
 	}
 
-	// После удаления GetByID должно вернуть ошибку.
-	_, err = store.GetByID(r.ID)
-	if err == nil {
-		t.Error("expected error after deletion, got nil")
+	// После отмены напоминание должно остаться в БД со статусом cancelled.
+	got, err := store.GetByID(r.ID)
+	if err != nil {
+		t.Fatalf("GetByID after cancel: %v", err)
+	}
+	if got.Status != models.StatusCancelled {
+		t.Errorf("Status after cancel: got %q, want %q", got.Status, models.StatusCancelled)
 	}
 }

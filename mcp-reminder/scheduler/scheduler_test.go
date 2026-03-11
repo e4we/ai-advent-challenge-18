@@ -10,6 +10,23 @@ import (
 	"mcp-reminder/storage"
 )
 
+// waitFor выполняет polling вместо time.Sleep, чтобы избежать flaky-тестов.
+// Проверяет условие каждые 50ms, завершается ошибкой через 5 секунд.
+func waitFor(t *testing.T, check func() bool) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		if check() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for condition")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
 // newTestStore создаёт изолированное хранилище для тестов планировщика.
 func newTestStore(t *testing.T) *storage.Store {
 	t.Helper()
@@ -48,10 +65,13 @@ func TestSchedulerFiresReminder(t *testing.T) {
 	go sched.Start(ctx)
 	defer sched.Stop()
 
-	// Ждём 2-3 тика чтобы планировщик успел обработать напоминание.
-	time.Sleep(350 * time.Millisecond)
+	// Polling вместо time.Sleep — ждём пока планировщик обработает напоминание.
+	waitFor(t, func() bool {
+		updated, err := store.GetByID(r.ID)
+		return err == nil && updated.Status == models.StatusFired
+	})
 
-	// Получаем обновлённое напоминание.
+	// Получаем обновлённое напоминание для финальных проверок.
 	updated, err := store.GetByID(r.ID)
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
@@ -90,8 +110,23 @@ func TestSchedulerReschedule(t *testing.T) {
 	go sched.Start(ctx)
 	defer sched.Stop()
 
-	// Ждём нескольких тиков.
-	time.Sleep(350 * time.Millisecond)
+	// Polling вместо time.Sleep — ждём пока планировщик обработает и перепланирует.
+	waitFor(t, func() bool {
+		fired, err := store.GetByID(r.ID)
+		if err != nil || fired.Status != models.StatusFired {
+			return false
+		}
+		allPending, err := store.List(models.StatusPending)
+		if err != nil {
+			return false
+		}
+		for _, pr := range allPending {
+			if pr.ID != r.ID && pr.Title == r.Title {
+				return true
+			}
+		}
+		return false
+	})
 
 	// Исходное напоминание должно стать fired.
 	fired, err := store.GetByID(r.ID)

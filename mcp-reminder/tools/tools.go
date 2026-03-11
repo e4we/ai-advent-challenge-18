@@ -81,8 +81,9 @@ type CreateReminderInput struct {
 	Title string `json:"title" jsonschema:"description=Текст напоминания"`
 
 	// DueInMinutes — через сколько минут сработает напоминание.
-	// Используется если не задан cron_expr.
-	DueInMinutes int `json:"due_in_minutes,omitempty" jsonschema:"description=Через сколько минут сработать (0 = сейчас)"`
+	// Используется если не задан cron_expr. 0 = сейчас.
+	// Указатель позволяет различить "поле не передано" (nil) и "передан 0".
+	DueInMinutes *int `json:"due_in_minutes,omitempty" jsonschema:"description=Через сколько минут сработать (0 = сейчас)"`
 
 	// CronExpr — cron-расписание для периодических напоминаний.
 	// Пример: "0 9 * * 1-5" — каждый будний день в 9:00.
@@ -99,8 +100,12 @@ type CreateReminderOutput struct {
 
 func makeCreateReminderHandler(store *storage.Store) mcp.ToolHandlerFor[CreateReminderInput, CreateReminderOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input CreateReminderInput) (*mcp.CallToolResult, CreateReminderOutput, error) {
+		dueInMin := 0
+		if input.DueInMinutes != nil {
+			dueInMin = *input.DueInMinutes
+		}
 		logger.Printf("create_reminder: title=%q, due_in_minutes=%d, cron_expr=%q",
-			input.Title, input.DueInMinutes, input.CronExpr)
+			input.Title, dueInMin, input.CronExpr)
 
 		// Валидация: title обязателен.
 		if input.Title == "" {
@@ -108,7 +113,8 @@ func makeCreateReminderHandler(store *storage.Store) mcp.ToolHandlerFor[CreateRe
 		}
 
 		// Валидация: должен быть задан хотя бы один из параметров времени.
-		if input.DueInMinutes == 0 && input.CronExpr == "" {
+		// nil означает "поле не передано", 0 означает "прямо сейчас".
+		if input.DueInMinutes == nil && input.CronExpr == "" {
 			return nil, CreateReminderOutput{}, fmt.Errorf("укажи due_in_minutes или cron_expr")
 		}
 
@@ -124,7 +130,8 @@ func makeCreateReminderHandler(store *storage.Store) mcp.ToolHandlerFor[CreateRe
 			dueAt = schedule.Next(time.Now())
 		} else {
 			// Для одноразового напоминания: сейчас + указанное количество минут.
-			dueAt = time.Now().Add(time.Duration(input.DueInMinutes) * time.Minute)
+			// 0 минут = напоминание "прямо сейчас".
+			dueAt = time.Now().Add(time.Duration(dueInMin) * time.Minute)
 		}
 
 		reminder := models.NewReminder(input.Title, dueAt, input.CronExpr)
@@ -274,10 +281,7 @@ func makeDeleteReminderHandler(store *storage.Store) mcp.ToolHandlerFor[DeleteRe
 			return nil, DeleteReminderOutput{}, fmt.Errorf("напоминание %q не найдено", input.ID)
 		}
 
-		// Помечаем как cancelled (soft delete), а не физически удаляем.
-		// Это сохраняет историю и позволяет объяснить Claude что произошло.
-		// Используем SQL UPDATE напрямую через специальный метод.
-		if err := cancelReminder(store, input.ID); err != nil {
+		if err := store.Cancel(input.ID); err != nil {
 			return nil, DeleteReminderOutput{}, fmt.Errorf("ошибка отмены напоминания: %w", err)
 		}
 
@@ -289,18 +293,5 @@ func makeDeleteReminderHandler(store *storage.Store) mcp.ToolHandlerFor[DeleteRe
 	}
 }
 
-// cancelReminder помечает напоминание как cancelled.
-// Реализовано через Delete + Create нельзя (потеряем историю),
-// поэтому вызываем store.Delete — он физически удаляет.
-// Для soft-delete нам нужен отдельный метод, но его нет в Store.
-// Вместо этого используем временный JSON-трюк через GetByID + Store.
-// TODO: добавить Store.Cancel(id) для чистоты архитектуры.
-//
-// Пока используем store.Delete как "отмену" — ID всё равно не повторяется.
-func cancelReminder(store *storage.Store, id string) error {
-	// Получаем напоминание, обновляем статус через JSON-маршалинг не нужен —
-	// просто используем физическое удаление. Семантически для пользователя
-	// это та же "отмена": напоминание больше не сработает.
-	return store.Delete(id)
-}
+
 
